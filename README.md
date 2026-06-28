@@ -101,7 +101,7 @@ flowchart TD
 
     subgraph S2["Triangulation"]
         D["<b>Triangulate 3D Points</b><br/>cv2.triangulatePoints()"]
-        E["<b>Homogeneous</b></br>↓</br><b>Euclidean</b><br/>"]
+        E["<b>Homogeneous coordinates</b></br>↓</br><b>Euclidean coordinates</b><br/>"]
         C --> D --> E
     end
 
@@ -118,4 +118,6 @@ flowchart TD
 ```
 
 ## 5. IBVS Control
+
+
 
