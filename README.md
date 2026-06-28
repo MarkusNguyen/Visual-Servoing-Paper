@@ -25,73 +25,97 @@
 | :--- | :--- | :--- | :--- |
 | 1 | 6×1 | Controlling Twist `[vx, vy, vz, ωx, ωy, ωz]` | Controlling twist of gripper/TCP expressed in `base_link` frame |
 
-## System Architecture
+## 1. System Architecture
 
 ```mermaid  
 flowchart 
 classDef large font-size:10px;
 
-A["<b>Source Keypoint Extractor</b><br/>(SuperPoint)"]  
-B["<b>Feature Matching</b><br/>(LightGlue)"]  
-C["<b>IBVS Controller</b>"]  
-D["<b>State Machine</b>"]  
-E["<b>Motion Update</b><br/>(Twist)"]  
+A["<b>Source Feature Matching</br>& Source Keypoint Extraction</b><br/>(SuperPoint+SuperGlue)"]  
+B["<b>Live Feature Matching <br/>& Stereo Pair Filtering</b><br/>(SuperPoint+LightGlue)"]  
+C["<b>3D point Computation</b></br>(Stereo Triangulation)"]
+D["<b>IBVS Controller</b>"]  
+E["<b>State Machine</b>"]  
+F["<b>Motion Update</b><br/>(Twist)"]  
 
-class A,B,C,D,E large
+class A,B,C,D,E,F large
 
-A --> B --> C --> D --> E
+A --> B --> C --> D --> E --> F
 ```
 
-## Source Images Keypoint Extraction (One-Time)
+## 2. Source Images Keypoint Extraction (One-Time)
 
 ```mermaid
 flowchart TD
-    A["Load Source Images<br/>Left, Center, Right<br/>(1152×1024 px)"] --> B["SuperPoint Feature<br/>Extraction (per image)"]
-    B --> C["SuperGlue<br/>Matching"]
-    C --> C1["center ↔ left<br/>keypoint match"]
-    C --> C2["center ↔ right<br/>keypoint match"]
-    C1 --> D1["MAGSAC Homography<br/>Outlier Filtering<br/>(ransacReprojThreshold=3.5)"]
-    C2 --> D2["MAGSAC Homography<br/>Outlier Filtering<br/>(ransacReprojThreshold=3.5)"]
-    D1 --> E1["Store: center_left ↔ left<br/>stereo correspondences"]
-    D2 --> E2["Store: center_right ↔ right<br/>stereo correspondences"]
-    E1 --> F["Cache source keypoints<br/>in pixel coordinates"]
+    A["Source <b>Image Left</b><br/>(1152×1024 px)"]
+    A1["Source <b>Image Center</b><br/>(1152×1024 px)"]
+    A2["Source <b>Image Right</b><br/>(1152×1024 px)"]
+
+    A --> B["<b>Source Center Image</b><br/>Feature Extraction<br/>(SuperPoint)"]
+    A1 --> B1["<b>Source Left Image</b><br/>Feature Extraction<br/>(SuperPoint)"]
+    A2 --> B2["<b>Source Right Image</b><br/>Feature Extraction<br/>(SuperPoint)"]
+
+    C["Matching Feature</br><b>Left ↔ Center</b></br>(SuperGlue)"]
+    C1["Matching Feature</br><b>Center ↔ Right</b></br>(SuperGlue)"]
+    B --> C
+    B1 --> C    
+    B2 --> C1
+    B --> C1
+
+    C --> D["MAGSAC Homography<br/><b>Outlier Filtering</b><br/>(ransacReprojThreshold=3.5)"]
+    C1 --> D1["MAGSAC Homography<br/><b>Outlier Filtering</b><br/>(ransacReprojThreshold=3.5)"]
+    
+    D --> E["Matched<br/><b>Source Left</b><br/>Keypoints</br>(Pixel coordinates)"]
+    D --> E1["Matched<br/><b>Source Center ↔ Left</b><br/>Keypoints</br>(Pixel coordinates)"]
+    D1 --> E2["Matched<br/><b>Source Center ↔ Right</b><br/>Keypoints</br>(Pixel coordinates)"]
+    D1 --> E3["Matched<br/><b>Source Right</b><br/>Keypoints</br>(Pixel coordinates)"]
+
+    F["Store</br><b>Stereo Correspondence Source Keypoints</b><br/>in pixel coordinates"]
+    E --> F
+    E1 --> F
     E2 --> F
-    F --> G["Pre-extract SuperPoint<br/>features from all 3<br/>source images for reuse"]
-    G --> H["Free SourceKpts<br/>(GPU memory)"]
+    E3 --> F
+    
 ```
 
 *Key design*:<br/>• SourceKpts uses a separate SuperPoint+SuperGlue instance that is discarded after extraction to free GPU memory.<br/>• FeatureMatching then uses a fresh SuperPoint+LightGlue instance for the online matching loop.
 
-## 3. Feature Matching Extraction (Trinocular, per Iteration)
+## 3. Feature Matching & Stereo Pair Filtering (per Iteration)
+
+![My Image](Charts/Feature_Matching_&_Stereo_Pair_Filtering.drawio.png)
+
+## 4. Stereo Triangulation → 3D Feature Points
 
 ```mermaid
 flowchart TD
-    subgraph "3× SuperPoint Extraction (CUDA Stream Overlap)"
-        A1["Live Left Image"] --> B1["SuperPoint Extract<br/>(stream_L)"]
-        A2["Live Center Image"] --> B2["SuperPoint Extract<br/>(stream_C)"]
-        A3["Live Right Image"] --> B3["SuperPoint Extract<br/>(stream_R)"]
+
+    subgraph S1["Camera Geometry"]
+        subgraph S11["<b>Pre-computed</b>"]
+            A["<b>Stereo Keypoint Pairs</b><br/>(Center, Side)"]
+        end
+        B["<b>Invert Extrinsics</b><br/>R = Rᵀ<br/>t = −Rᵀt"]
+        C["<b>Build Projection Matrices</b><br/>P<sub>center</sub> = K[I | 0]<br/>P<sub>side</sub> = K[R | t]"]
+        A --> B --> C
+        style S11 fill:#4285f4,stroke:#333,stroke-width:2px
     end
 
-    B1 --> C1["Wait stream_L"]
-    B2 --> C2["Wait stream_C"]
-    B3 --> C3["Wait stream_R"]
+    subgraph S2["Triangulation"]
+        D["<b>Triangulate 3D Points</b><br/>cv2.triangulatePoints()"]
+        E["<b>Homogeneous</b></br>↓</br><b>Euclidean</b><br/>"]
+        C --> D --> E
+    end
 
-    C1 --> D1["LightGlue Match<br/>Left Live ↔ Left Source<br/>(source feats precomputed)"]
-    C3 --> D2["LightGlue Match<br/>Right Live ↔ Right Source<br/>(source feats precomputed)"]
-    C2 --> D3["LightGlue Match<br/>Center Live ↔ Center Source<br/>(source feats precomputed)"]
+    subgraph S3["Depth & Normalization"]
+        F["<b>Extract Depth Z</b><br/>from euclidean coordinates "]
+        G["<b>Normalize Image Coordinates</b><br/>x = (u − c<sub>x</sub>)/f<sub>x</sub><br/>y = (v − c<sub>y</sub>)/f<sub>y</sub>"]
+        E --> F --> G
+    end
 
-    D1 --> E1["Filter: match_specific_kpts<br/>→ src left keypoints only"]
-    D2 --> E2["Filter: match_specific_kpts<br/>→ src right keypoints only"]
-    D3 --> E3["Filter center_left keypoints"]
-    D3 --> E4["Filter center_right keypoints"]
-
-    E1 --> F1["Validity check:<br/>both center_left AND left<br/>must be valid (not NaN)"]
-    E3 --> F1
-    E2 --> F2["Validity check:<br/>both center_right AND right<br/>must be valid (not NaN)"]
-    E4 --> F2
-
-    F1 --> G1["Left Stereo Pairs<br/>(center_left_src, left_src)<br/>vs (center_left_live, left_live)"]
-    F2 --> G2["Right Stereo Pairs<br/>(center_right_src, right_src)<br/>vs (center_right_live, right_live)"]
+    subgraph S4["3D Reconstruction"]
+        H["<b>Compute 3D Point</b><br/>X = (x × Z, y × Z, Z)"]
+        G --> H
+    end
 ```
 
+## 5. IBVS Control
 
